@@ -26,15 +26,26 @@ def get_all_soccer_sports(key):
 @st.cache_data(ttl=1800)
 def fetch_soccer_odds(key, sports_tuple):
     all_fixtures = []
-    markets = "h2h,totals,btts"
     region = "uk,eu" 
     errors = []
     
     for sport in sports_tuple:
+        # Try primary request with h2h, totals, and btts
+        markets = "h2h,totals,btts"
         url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={key}&regions={region}&markets={markets}&oddsFormat=decimal"
         response = requests.get(url)
+        
         if response.status_code == 200:
             all_fixtures.extend(response.json())
+        elif response.status_code == 422 and "btts" in response.text:
+            # Fallback gracefully for regional leagues that don't support btts
+            markets_fallback = "h2h,totals"
+            url_fallback = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={key}&regions={region}&markets={markets_fallback}&oddsFormat=decimal"
+            response_fb = requests.get(url_fallback)
+            if response_fb.status_code == 200:
+                all_fixtures.extend(response_fb.json())
+            else:
+                errors.append(f"{sport}: HTTP {response_fb.status_code} - {response_fb.text}")
         else:
             errors.append(f"{sport}: HTTP {response.status_code} - {response.text}")
             

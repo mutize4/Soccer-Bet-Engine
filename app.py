@@ -17,7 +17,7 @@ api_key = st.sidebar.text_input(
     "The Odds API Key", value=default_key, type="password"
 )
 
-# --- HELPER FUNCTIONS ---
+# --- HELper FUNCTIONS ---
 
 
 @st.cache_data(ttl=3600)
@@ -40,13 +40,14 @@ def fetch_soccer_odds(key, sports_tuple):
   errors = []
 
   for sport in sports_tuple:
-    markets = "h2h,totals,btts"
+    markets = "h2h,totals,btts,team_totals"
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={key}&regions={region}&markets={markets}&oddsFormat=decimal"
     response = requests.get(url)
 
     if response.status_code == 200:
       all_fixtures.extend(response.json())
-    elif response.status_code == 422 and "btts" in response.text:
+    elif response.status_code == 422:
+      # Fallback gracefully if team_totals or btts are unsupported by specific regional leagues
       markets_fallback = "h2h,totals"
       url_fallback = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={key}&regions={region}&markets={markets_fallback}&oddsFormat=decimal"
       response_fb = requests.get(url_fallback)
@@ -144,19 +145,23 @@ with tab1:
             sport_key = match.get("sport_key")
             match_name = f"{home} vs {away}"
 
+            # Extract raw bookmaker markets for storage
+            match_bookmakers = match.get("bookmakers", [])
+
             extracted_fixtures.append({
                 "id": match_id,
                 "sport": sport_key,
                 "match": match_name,
                 "home": home,
                 "away": away,
+                "bookmakers": match_bookmakers,
             })
 
             h2h_outcomes = {}
             totals_outcomes = {}
             btts_outcomes = {}
 
-            for bookmaker in match.get("bookmakers", []):
+            for bookmaker in match_bookmakers:
               bk_name = bookmaker.get("title")
               for market in bookmaker.get("markets", []):
                 key = market.get("key")
@@ -283,8 +288,8 @@ with tab2:
   st.subheader("Team & Match Specials Poisson Engine")
   st.markdown(
       "Model match goal distributions using Expected Goals (xG) inputs to"
-      " project exact scoreline probabilities, individual team goal"
-      " probabilities, and total goal thresholds."
+      " project exact scoreline probabilities, individual team over 1.5 goal"
+      " locks, and value edges."
   )
 
   fixtures = st.session_state.get("live_fixtures", [])
@@ -292,7 +297,9 @@ with tab2:
   if fixtures:
     match_options = [f["match"] for f in fixtures]
     selected_match_name = st.selectbox(
-        "Select Fixture for Poisson Modeling:", match_options
+        "Select Fixture for Poisson Modeling:",
+        match_options,
+        key="tab2_match_select",
     )
 
     selected_match_data = next(
@@ -302,15 +309,49 @@ with tab2:
     if selected_match_data:
       home_team = selected_match_data["home"]
       away_team = selected_match_data["away"]
+      match_bookmakers = selected_match_data.get("bookmakers", [])
 
       col_p1, col_p2 = st.columns(2)
       with col_p1:
         home_xg = st.slider(
-            f"{home_team} Expected Goals (xG)", 0.5, 3.5, 1.5, 0.1
+            f"{home_team} Expected Goals (xG)",
+            0.5,
+            3.5,
+            1.5,
+            0.1,
+            key="home_xg_slider",
         )
       with col_p2:
         away_xg = st.slider(
-            f"{away_team} Expected Goals (xG)", 0.3, 3.0, 1.1, 0.1
+            f"{away_team} Expected Goals (xG)",
+            0.3,
+            3.0,
+            1.1,
+            0.1,
+            key="away_xg_slider",
+        )
+
+      # Thresholds for Poisson Evaluation
+      st.markdown("---")
+      st.write("### ⚙️ Evaluation Thresholds")
+      c_th1, c_th2 = st.columns(2)
+      with c_th1:
+        poisson_prob_thresh = st.slider(
+            "Model Probability Lock Threshold (%)",
+            40,
+            85,
+            55,
+            5,
+            key="poisson_prob_slider",
+        )
+      with c_th2:
+        poisson_ev_thresh = st.slider(
+            "Minimum +EV Edge Threshold (%)",
+            0.0,
+            10.0,
+            2.0,
+            0.5,
+            key="poisson_ev_slider",
         )
 
       # Calculate Poisson Matrix (up to 5 goals each)
@@ -347,8 +388,81 @@ with tab2:
 
         score_matrix.append(row)
 
+      # Team Over 1.5 Goals Probabilities (P(X >= 2) = 1 - P(0) - P(1))
+      home_over_15_prob = (
+          1.0 - home_probs[0] - home_probs[1]
+      ) * 100.0
+      away_over_15_prob = (
+          1.0 - away_probs[0] - away_probs[1]
+      ) * 100.0
+
+      # Extract market team total odds if available from bookmakers
+      home_over_15_odds = []
+      away_over_15_odds = []
+
+      for bk in match_bookmakers:
+        bk_name = bk.get("title")
+        for market in bk.get("markets", []):
+          if market.get("key") == "team_totals":
+            for outcome in market.get("outcomes", []):
+              if (
+                  outcome.get("point") == 1.5
+                  and outcome.get("name") == "Over"
+              ):
+                desc = outcome.get("description")  # Team name associated
+                price = outcome.get("price")
+                if desc == home_team:
+                  home_over_15_odds.append({"price": price, "bookie": bk_name})
+                elif desc == away_team:
+                  away_over_15_odds.append({"price": price, "bookie": bk_name})
+
+      # Function to evaluate lock and value for team over 1.5
+      def evaluate_team_over_15(team_name, prob_val, odds_list):
+        lock_status = (
+            "🔒 LOCK" if prob_val >= poisson_prob_thresh else "⚠️ LEAVE"
+        )
+        if odds_list:
+          best_item = max(odds_list, key=lambda x: x["price"])
+          best_odd = best_item["price"]
+          best_bookie = best_item["bookie"]
+          ev_edge = (((prob_val / 100.0) * best_odd) - 1.0) * 100.0
+          val_status = (
+              "🔒 +EV VALUE" if ev_edge >= poisson_ev_thresh else "⚠️ NO VALUE"
+          )
+          return {
+              "Team": team_name,
+              "Model Prob": f"{prob_val:.1f}%",
+              "Prob Lock": lock_status,
+              "Best Bookmaker": best_bookie,
+              "Best Odds": best_odd,
+              "EV Edge": f"{ev_edge:+.1f}%",
+              "Value Signal": val_status,
+          }
+        else:
+          fair_odd = 1.0 / (prob_val / 100.0) if prob_val > 0 else 0.0
+          return {
+              "Team": team_name,
+              "Model Prob": f"{prob_val:.1f}%",
+              "Prob Lock": lock_status,
+              "Best Bookmaker": "N/A (No Market Feed)",
+              "Best Odds": round(fair_odd, 2),
+              "EV Edge": "N/A",
+              "Value Signal": "⚠️ NO ODDS FEED",
+          }
+
+      home_eval = evaluate_team_over_15(
+          home_team, home_over_15_prob, home_over_15_odds
+      )
+      away_eval = evaluate_team_over_15(
+          away_team, away_over_15_prob, away_over_15_odds
+      )
+
+      st.write("### 🎯 Team Over 1.5 Goals Analysis")
+      team_over_df = pd.DataFrame([home_eval, away_eval])
+      st.dataframe(team_over_df, use_container_width=True, hide_index=True)
+
       # Display summary metrics
-      st.write("### 📊 Model Output Probabilities")
+      st.write("### 📊 Overall Match Model Probabilities")
       m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
       m_col1.metric(f"{home_team} Win", f"{home_win_prob * 100:.1f}%")
       m_col2.metric("Draw", f"{draw_prob * 100:.1f}%")
@@ -356,8 +470,8 @@ with tab2:
       m_col4.metric("BTTS Yes", f"{btts_prob * 100:.1f}%")
       m_col5.metric("Over 2.5 Goals", f"{over_25_prob * 100:.1f}%")
 
-      # Display Individual Team Goal Probabilities
-      st.write("### ⚽ Individual Team Goal Probabilities")
+      # Display Individual Team Goal Breakdowns
+      st.write("### ⚽ Full Individual Team Goal Probabilities")
       t_col1, t_col2 = st.columns(2)
 
       with t_col1:

@@ -283,8 +283,8 @@ with tab2:
   st.subheader("Team & Match Specials Poisson Engine")
   st.markdown(
       "Model match goal distributions using Expected Goals (xG) inputs to"
-      " project exact scoreline probabilities, win/draw/loss matrices, and"
-      " total goal thresholds."
+      " project exact scoreline probabilities, individual team goal"
+      " probabilities, and total goal thresholds."
   )
 
   fixtures = st.session_state.get("live_fixtures", [])
@@ -355,6 +355,32 @@ with tab2:
       m_col3.metric(f"{away_team} Win", f"{away_win_prob * 100:.1f}%")
       m_col4.metric("BTTS Yes", f"{btts_prob * 100:.1f}%")
       m_col5.metric("Over 2.5 Goals", f"{over_25_prob * 100:.1f}%")
+
+      # Display Individual Team Goal Probabilities
+      st.write("### ⚽ Individual Team Goal Probabilities")
+      t_col1, t_col2 = st.columns(2)
+
+      with t_col1:
+        st.write(f"**{home_team} Goal Breakdown**")
+        home_goal_df = pd.DataFrame({
+            "Goals": [
+                f"{i} Goals" if i < max_goals else f"{max_goals}+ Goals"
+                for i in range(max_goals + 1)
+            ],
+            "Probability": [f"{p * 100:.1f}%" for p in home_probs],
+        })
+        st.dataframe(home_goal_df, use_container_width=True, hide_index=True)
+
+      with t_col2:
+        st.write(f"**{away_team} Goal Breakdown**")
+        away_goal_df = pd.DataFrame({
+            "Goals": [
+                f"{j} Goals" if j < max_goals else f"{max_goals}+ Goals"
+                for j in range(max_goals + 1)
+            ],
+            "Probability": [f"{p * 100:.1f}%" for p in away_probs],
+        })
+        st.dataframe(away_goal_df, use_container_width=True, hide_index=True)
 
       # Display Scoreline Matrix
       st.write("### 🧮 Exact Scoreline Probability Matrix (Home vs Away)")

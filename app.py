@@ -17,7 +17,7 @@ api_key = st.sidebar.text_input(
     "The Odds API Key", value=default_key, type="password"
 )
 
-# --- HELper FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
 
 
 @st.cache_data(ttl=3600)
@@ -47,7 +47,6 @@ def fetch_soccer_odds(key, sports_tuple):
     if response.status_code == 200:
       all_fixtures.extend(response.json())
     elif response.status_code == 422:
-      # Fallback gracefully if team_totals or btts are unsupported by specific regional leagues
       markets_fallback = "h2h,totals"
       url_fallback = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={key}&regions={region}&markets={markets_fallback}&oddsFormat=decimal"
       response_fb = requests.get(url_fallback)
@@ -77,6 +76,17 @@ def poisson_prob(lmbda, k):
   return (lmbda**k * math.exp(-lmbda)) / math.factorial(k)
 
 
+# Helper to convert UTC API time to SAST / CAT (UTC+2)
+def format_kickoff_time(iso_string):
+  dt = pd.to_datetime(iso_string)
+  if dt.tzinfo is None:
+    dt = dt.tz_localize("UTC")
+  else:
+    dt = dt.tz_convert("UTC")
+  sast_dt = dt.tz_convert("Africa/Johannesburg")
+  return sast_dt.strftime("%Y-%m-%d %H:%M") + " SAST"
+
+
 # --- APP LAYOUT & TABS ---
 st.title("⚽ Quantitative Soccer Betting Dashboard")
 
@@ -92,7 +102,7 @@ with tab1:
   st.markdown(
       "Scans consensus market lines (**H2H**, **Over/Under 2.5**, and"
       " **BTTS**), de-vigs house margin, and checks **Prob Lock** and **+EV"
-      " Edge**."
+      " Edge** (Times in SAST/CAT)."
   )
 
   col_t1_a, col_t1_b = st.columns(2)
@@ -135,9 +145,7 @@ with tab1:
           extracted_fixtures = []
 
           for match in data:
-            commence_time = pd.to_datetime(
-                match.get("commence_time")
-            ).strftime("%Y-%m-%d %H:%M")
+            commence_time = format_kickoff_time(match.get("commence_time"))
             home = match.get("home_team")
             away = match.get("away_team")
             league = match.get("sport_title")
@@ -145,7 +153,6 @@ with tab1:
             sport_key = match.get("sport_key")
             match_name = f"{home} vs {away}"
 
-            # Extract raw bookmaker markets for storage
             match_bookmakers = match.get("bookmakers", [])
 
             extracted_fixtures.append({
@@ -288,8 +295,7 @@ with tab2:
   st.subheader("Team & Match Specials Poisson Engine")
   st.markdown(
       "Model match goal distributions using Expected Goals (xG) inputs to"
-      " project exact scoreline probabilities, individual team over 1.5 goal"
-      " locks, and value edges."
+      " project core probabilities and team over 1.5 goal targets."
   )
 
   fixtures = st.session_state.get("live_fixtures", [])
@@ -331,7 +337,6 @@ with tab2:
             key="away_xg_slider",
         )
 
-      # Thresholds for Poisson Evaluation
       st.markdown("---")
       st.write("### ⚙️ Evaluation Thresholds")
       c_th1, c_th2 = st.columns(2)
@@ -354,7 +359,6 @@ with tab2:
             key="poisson_ev_slider",
         )
 
-      # Calculate Poisson Matrix (up to 5 goals each)
       max_goals = 5
       home_probs = [poisson_prob(home_xg, i) for i in range(max_goals + 1)]
       away_probs = [poisson_prob(away_xg, j) for j in range(max_goals + 1)]
@@ -365,13 +369,9 @@ with tab2:
       btts_prob = 0.0
       over_25_prob = 0.0
 
-      score_matrix = []
-
       for h in range(max_goals + 1):
-        row = []
         for a in range(max_goals + 1):
           p = home_probs[h] * away_probs[a]
-          row.append(f"{p * 100:.1f}%")
 
           if h > a:
             home_win_prob += p
@@ -386,9 +386,6 @@ with tab2:
           if (h + a) > 2.5:
             over_25_prob += p
 
-        score_matrix.append(row)
-
-      # Team Over 1.5 Goals Probabilities (P(X >= 2) = 1 - P(0) - P(1))
       home_over_15_prob = (
           1.0 - home_probs[0] - home_probs[1]
       ) * 100.0
@@ -396,7 +393,6 @@ with tab2:
           1.0 - away_probs[0] - away_probs[1]
       ) * 100.0
 
-      # Extract market team total odds if available from bookmakers
       home_over_15_odds = []
       away_over_15_odds = []
 
@@ -409,14 +405,13 @@ with tab2:
                   outcome.get("point") == 1.5
                   and outcome.get("name") == "Over"
               ):
-                desc = outcome.get("description")  # Team name associated
+                desc = outcome.get("description")
                 price = outcome.get("price")
                 if desc == home_team:
                   home_over_15_odds.append({"price": price, "bookie": bk_name})
                 elif desc == away_team:
                   away_over_15_odds.append({"price": price, "bookie": bk_name})
 
-      # Function to evaluate lock and value for team over 1.5
       def evaluate_team_over_15(team_name, prob_val, odds_list):
         lock_status = (
             "🔒 LOCK" if prob_val >= poisson_prob_thresh else "⚠️ LEAVE"
@@ -461,7 +456,6 @@ with tab2:
       team_over_df = pd.DataFrame([home_eval, away_eval])
       st.dataframe(team_over_df, use_container_width=True, hide_index=True)
 
-      # Display summary metrics
       st.write("### 📊 Overall Match Model Probabilities")
       m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
       m_col1.metric(f"{home_team} Win", f"{home_win_prob * 100:.1f}%")
@@ -470,7 +464,6 @@ with tab2:
       m_col4.metric("BTTS Yes", f"{btts_prob * 100:.1f}%")
       m_col5.metric("Over 2.5 Goals", f"{over_25_prob * 100:.1f}%")
 
-      # Display Individual Team Goal Breakdowns
       st.write("### ⚽ Full Individual Team Goal Probabilities")
       t_col1, t_col2 = st.columns(2)
 
@@ -495,15 +488,6 @@ with tab2:
             "Probability": [f"{p * 100:.1f}%" for p in away_probs],
         })
         st.dataframe(away_goal_df, use_container_width=True, hide_index=True)
-
-      # Display Scoreline Matrix
-      st.write("### 🧮 Exact Scoreline Probability Matrix (Home vs Away)")
-      score_df = pd.DataFrame(
-          score_matrix,
-          index=[f"{home_team} {i}" for i in range(max_goals + 1)],
-          columns=[f"{away_team} {j}" for j in range(max_goals + 1)],
-      )
-      st.dataframe(score_df, use_container_width=True)
   else:
     st.info(
         "Please run a scan in **Tab 1** first to load active fixtures for"

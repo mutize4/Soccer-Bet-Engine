@@ -1,3 +1,7 @@
+import streamlit as st
+import requests
+import pandas as pd
+
 # --- HELPER FUNCTION UPDATE ---
 @st.cache_data(ttl=1800)
 def fetch_soccer_odds(key, sports_tuple):

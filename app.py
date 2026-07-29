@@ -2,11 +2,30 @@ import streamlit as st
 import requests
 import pandas as pd
 
-# --- HELPER FUNCTION UPDATE ---
+# Page setup
+st.set_page_config(page_title="Soccer Bet Engine", layout="wide")
+
+# --- SIDEBAR & API KEY SETUP ---
+st.sidebar.title("Settings")
+default_key = st.secrets.get("ODDS_API_KEY", "") if "ODDS_API_KEY" in st.secrets else ""
+api_key = st.sidebar.text_input("The Odds API Key", value=default_key, type="password")
+
+# --- HELPER FUNCTIONS ---
+@st.cache_data(ttl=3600)
+def get_all_soccer_sports(key):
+    url = f"https://api.the-odds-api.com/v4/sports/?apiKey={key}"
+    res = requests.get(url)
+    if res.status_code == 200:
+        sports = res.json()
+        soccer_sports = [s['key'] for s in sports if s.get('group') == 'Soccer']
+        rem_q = res.headers.get('x-requests-remaining', 'N/A')
+        used_q = res.headers.get('x-requests-used', 'N/A')
+        return soccer_sports, rem_q, used_q, None
+    return [], "N/A", "N/A", f"API Error: HTTP {res.status_code}"
+
 @st.cache_data(ttl=1800)
 def fetch_soccer_odds(key, sports_tuple):
     all_fixtures = []
-    # Added 'btts' to requested markets
     markets = "h2h,totals,btts"
     region = "uk,eu" 
     errors = []
@@ -21,6 +40,10 @@ def fetch_soccer_odds(key, sports_tuple):
             
     return all_fixtures, errors
 
+# --- APP LAYOUT & TABS ---
+st.title("⚽ Quantitative Soccer Betting Dashboard")
+
+tab1, tab2, tab3 = st.tabs(["Consensus Scanner", "Team/Match Specials", "Player Props"])
 
 # ==========================================
 # TAB 1: MATCH CONSENSUS SCANNER (H2H, Totals, BTTS)
@@ -128,7 +151,6 @@ with tab1:
                                     
                                     ev_edge = (((true_prob / 100.0) * best_odd) - 1.0) * 100.0
                                     
-                                    # Format label cleanly
                                     if name == "Draw":
                                         label_name = "Match Draw"
                                     elif "2.5 Goals" not in name and "BTTS" not in name:
@@ -179,3 +201,12 @@ with tab1:
                 st.warning("No active soccer leagues available right now.")
     else:
         st.info("Please enter your Odds API Key in the sidebar.")
+
+# Placeholder tabs
+with tab2:
+    st.subheader("Team & Match Specials Engine")
+    st.info("Select a fixture from Tab 1 to run Poisson goal-distribution models.")
+
+with tab3:
+    st.subheader("Player Props Scanner")
+    st.info("Prop models (Anytime Goalscorer, Shots on Target) unlock here.")
